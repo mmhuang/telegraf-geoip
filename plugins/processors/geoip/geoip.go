@@ -10,11 +10,14 @@ import (
 )
 
 const sampleConfig = `
-  ## db_path is the location of the MaxMind GeoIP2 City database
-  db_path = "/var/lib/GeoIP/GeoLite2-City.mmdb"
-  # db_type = "city" # city, country or asn (default: city)
+  ## city_db_path is the location of the MaxMind GeoIP2 City database
+  city_db_path = "/var/lib/GeoIP/GeoLite2-City.mmdb"
+  ## country_db_path is the location of the MaxMind GeoIP2 Country database
+  # country_db_path = "/var/lib/GeoIP/GeoLite2-Country.mmdb"
+  ## asn_db_path is the location of the MaxMind GeoIP2 ASN database
+  # asn_db_path = "/var/lib/GeoIP/GeoLite2-ASN.mmdb"
 
-  [[processors.geoip.lookup]
+  [[processors.geoip.lookup]]
 	# get the ip from the field "source_ip" and put the lookup results in the respective destination fields (if specified)
 	field = "source_ip"
 	dest_country = "source_country"
@@ -39,79 +42,99 @@ type lookupEntry struct {
 }
 
 type GeoIP struct {
-	DBPath  string          `toml:"db_path"`
-	DBType  string          `toml:"db_type"`
-	Lookups []lookupEntry   `toml:"lookup"`
-	Log     telegraf.Logger `toml:"-"`
-}
+	CityDBPath    string          `toml:"city_db_path"`
+	CountryDBPath string          `toml:"country_db_path"`
+	ASNDBPath     string          `toml:"asn_db_path"`
+	Lookups       []lookupEntry   `toml:"lookup"`
+	Log           telegraf.Logger `toml:"-"`
 
-var cityReader *geoip2.CityReader
-var countryReader *geoip2.CountryReader
-var ASNReader *geoip2.ASNReader
+	cityReader    *geoip2.CityReader
+	countryReader *geoip2.CountryReader
+	asnReader     *geoip2.ASNReader
+}
 
 func (g *GeoIP) SampleConfig() string {
 	return sampleConfig
 }
 
 func (g *GeoIP) Description() string {
-	return "GeoIP looks up the country code, city name and latitude/longitude for IP addresses in the MaxMind GeoIP database"
+	return "GeoIP looks up geo information and ASN details using MaxMind GeoIP2 databases"
 }
 
 func (g *GeoIP) Apply(metrics ...telegraf.Metric) []telegraf.Metric {
 	for _, point := range metrics {
 		for _, lookup := range g.Lookups {
-			if lookup.Field != "" {
-				if value, ok := point.GetField(lookup.Field); ok {
-					if g.DBType == "city" || g.DBType == "" {
-						record, err := cityReader.Lookup(net.ParseIP(value.(string)))
-						if err != nil {
-							if err.Error() != "not found" {
-								g.Log.Errorf("GeoIP lookup error: %v", err)
-							}
-							continue
-						}
-						if len(lookup.DestCountry) > 0 {
-							point.AddField(lookup.DestCountry, record.Country.ISOCode)
-						}
-						if len(lookup.DestCity) > 0 {
-							point.AddField(lookup.DestCity, record.City.Names["en"])
-						}
-						if len(lookup.DestLat) > 0 {
-							point.AddField(lookup.DestLat, record.Location.Latitude)
-						}
-						if len(lookup.DestLon) > 0 {
-							point.AddField(lookup.DestLon, record.Location.Longitude)
-						}
-					} else if g.DBType == "country" {
-						record, err := countryReader.Lookup(net.ParseIP(value.(string)))
-						if err != nil {
-							if err.Error() != "not found" {
-								g.Log.Errorf("GeoIP lookup error: %v", err)
-							}
-							continue
-						}
-						if len(lookup.DestCountry) > 0 {
-							point.AddField(lookup.DestCountry, record.Country.ISOCode)
-						}
-					} else if g.DBType == "asn" {
-						record, err := ASNReader.Lookup(net.ParseIP(value.(string)))
-						if err != nil {
-							if err.Error() != "not found" {
-								g.Log.Errorf("GeoIP lookup error: %v", err)
-							}
-							continue
-						}
-						if len(lookup.DestAutonomousSystemNumber) > 0 {
-							point.AddField(lookup.DestAutonomousSystemNumber, record.AutonomousSystemNumber)
-						}
-						if len(lookup.DestAutonomousSystemOrganization) > 0 {
-							point.AddField(lookup.DestAutonomousSystemOrganization, record.AutonomousSystemOrganization)
-						}
-						if len(lookup.DestNetwork) > 0 {
-							point.AddField(lookup.DestNetwork, record.Network)
-						}
-					} else {
-						g.Log.Errorf("Invalid GeoIP database type specified: %s", g.DBType)
+			if lookup.Field == "" {
+				continue
+			}
+			value, ok := point.GetField(lookup.Field)
+			if !ok {
+				continue
+			}
+			ipStr, ok := value.(string)
+			if !ok {
+				g.Log.Errorf("Field %s is not a string", lookup.Field)
+				continue
+			}
+			ip := net.ParseIP(ipStr)
+			if ip == nil {
+				g.Log.Errorf("Invalid IP address: %s", ipStr)
+				continue
+			}
+
+			// Process City database
+			if g.cityReader != nil {
+				record, err := g.cityReader.Lookup(ip)
+				if err != nil {
+					if err.Error() != "not found" {
+						g.Log.Errorf("City GeoIP lookup error: %v", err)
+					}
+				} else {
+					if lookup.DestCountry != "" {
+						point.AddField(lookup.DestCountry, record.Country.ISOCode)
+					}
+					if lookup.DestCity != "" {
+						point.AddField(lookup.DestCity, record.City.Names["en"])
+					}
+					if lookup.DestLat != "" {
+						point.AddField(lookup.DestLat, record.Location.Latitude)
+					}
+					if lookup.DestLon != "" {
+						point.AddField(lookup.DestLon, record.Location.Longitude)
+					}
+				}
+			}
+
+			// Process Country database
+			if g.countryReader != nil {
+				record, err := g.countryReader.Lookup(ip)
+				if err != nil {
+					if err.Error() != "not found" {
+						g.Log.Errorf("Country GeoIP lookup error: %v", err)
+					}
+				} else {
+					if lookup.DestCountry != "" {
+						point.AddField(lookup.DestCountry, record.Country.ISOCode)
+					}
+				}
+			}
+
+			// Process ASN database
+			if g.asnReader != nil {
+				record, err := g.asnReader.Lookup(ip)
+				if err != nil {
+					if err.Error() != "not found" {
+						g.Log.Errorf("ASN GeoIP lookup error: %v", err)
+					}
+				} else {
+					if lookup.DestAutonomousSystemNumber != "" {
+						point.AddField(lookup.DestAutonomousSystemNumber, record.AutonomousSystemNumber)
+					}
+					if lookup.DestAutonomousSystemOrganization != "" {
+						point.AddField(lookup.DestAutonomousSystemOrganization, record.AutonomousSystemOrganization)
+					}
+					if lookup.DestNetwork != "" {
+						point.AddField(lookup.DestNetwork, record.Network)
 					}
 				}
 			}
@@ -121,37 +144,34 @@ func (g *GeoIP) Apply(metrics ...telegraf.Metric) []telegraf.Metric {
 }
 
 func (g *GeoIP) Init() error {
-	if g.DBType == "city" || g.DBType == "" {
-		r, err := geoip2.NewCityReaderFromFile(g.DBPath)
+	if g.CityDBPath == "" && g.CountryDBPath == "" && g.ASNDBPath == "" {
+		return fmt.Errorf("at least one of city_db_path, country_db_path, or asn_db_path must be specified")
+	}
+
+	var err error
+	if g.CityDBPath != "" {
+		g.cityReader, err = geoip2.NewCityReaderFromFile(g.CityDBPath)
 		if err != nil {
-			return fmt.Errorf("Error opening GeoIP database: %v", err)
-		} else {
-			cityReader = r
+			return fmt.Errorf("error opening City GeoIP database: %v", err)
 		}
-	} else if g.DBType == "country" {
-		r, err := geoip2.NewCountryReaderFromFile(g.DBPath)
+	}
+	if g.CountryDBPath != "" {
+		g.countryReader, err = geoip2.NewCountryReaderFromFile(g.CountryDBPath)
 		if err != nil {
-			return fmt.Errorf("Error opening GeoIP database: %v", err)
-		} else {
-			countryReader = r
+			return fmt.Errorf("error opening Country GeoIP database: %v", err)
 		}
-	} else if g.DBType == "asn" {
-		r, err := geoip2.NewASNReaderFromFile(g.DBPath)
+	}
+	if g.ASNDBPath != "" {
+		g.asnReader, err = geoip2.NewASNReaderFromFile(g.ASNDBPath)
 		if err != nil {
-			return fmt.Errorf("Error opening GeoIP database: %v", err)
-		} else {
-			ASNReader = r
+			return fmt.Errorf("error opening ASN GeoIP database: %v", err)
 		}
-	} else {
-		return fmt.Errorf("Invalid GeoIP database type specified: %s", g.DBType)
 	}
 	return nil
 }
 
 func init() {
 	processors.Add("geoip", func() telegraf.Processor {
-		return &GeoIP{
-			DBPath: "/var/lib/GeoIP/GeoLite2-Country.mmdb",
-		}
+		return &GeoIP{}
 	})
 }
